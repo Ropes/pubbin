@@ -15,6 +15,7 @@
 package cmd
 
 import (
+	"io/ioutil"
 	"os"
 	"os/signal"
 	"time"
@@ -22,12 +23,26 @@ import (
 	log "github.com/Sirupsen/logrus"
 	"github.com/spf13/cobra"
 	"golang.org/x/net/context"
+	"golang.org/x/oauth2/google"
 	"google.golang.org/cloud"
 	"google.golang.org/cloud/pubsub"
 )
 
 var subscription string
 var numConsume int
+
+var quit chan os.Signal
+
+func shouldQuit() bool {
+	select {
+	case <-quit:
+		signal.Stop(quit)
+		close(quit)
+		return true
+	default:
+		return false
+	}
+}
 
 // subCmd represents the sub command
 var subCmd = &cobra.Command{
@@ -45,58 +60,95 @@ to quickly create a Cobra application.`,
 		quit := make(chan os.Signal, 1)
 		signal.Notify(quit, os.Interrupt)
 
-		if gceproject == "" || topic == "" || subscription == "" {
-			log.Errorf("GCE project and topic must be defined")
+		if gceproject == "" || topic == "" || subscription == "" || keyPath == "" {
+			log.Errorf("GCE project, subscription, keypath, and topic must be defined")
 			os.Exit(1)
 		}
 
-		gc := initClient()
-		ctx := context.Background()
-		gctx := cloud.NewContext(gceproject, gc)
-		psClient, err := pubsub.NewClient(ctx, gceproject, gctx)
+		jsonKey, err := ioutil.ReadFile(keyPath)
 		if err != nil {
-			log.Errorf("error creating pubsub.Client: %v", err)
+			log.Errorf("error reading keyfile: %v", err)
 			os.Exit(1)
 		}
+
+		conf, err := google.JWTConfigFromJSON(jsonKey, pubsub.ScopePubSub)
+		if err != nil {
+			log.Errorf("error creating conf file: %v", err)
+		}
+
+		ctx := context.Background()
+		oauthTokenSource := conf.TokenSource(ctx)
+
+		psClient, err := pubsub.NewClient(ctx, gceproject, cloud.WithTokenSource(oauthTokenSource))
+		if err != nil {
+			log.Errorf("error creating pubsub client: %v", err)
+			os.Exit(1)
+		}
+		log.Debugf("client: %#v", psClient)
 
 		sub := psClient.Subscription(subscription)
 
-		it, err := sub.Pull(gctx, pubsub.MaxExtension(time.Minute))
+		it, err := sub.Pull(ctx, pubsub.MaxExtension(time.Minute))
 		if err != nil {
-			log.Errorf("error constructing iterator: %v", err)
-			os.Exit(1)
+			log.Errorf("error creating pubsub iterator: %v", err)
 		}
-
 		defer it.Stop()
-		go func() {
-			<-quit
-			it.Stop()
-		}()
 
-		for i := 0; i < *numConsume; i++ {
+		for !shouldQuit() {
 			m, err := it.Next()
-			if err == pubsub.Done {
-				break
-			}
 			if err != nil {
-				log.Errorf("advancing iterator %v", err)
-				break
+				log.Errorf("error reading from iterator: %v", err)
 			}
-			log.Infof("message: %#v", m)
-			m.Done(true)
+			log.Infof("msg read: %#v", m)
 		}
 
 		/*
-			msgs, err := pubsub.Pull(gctx, topic, 10)
+			gc := initClient()
+			ctx := context.Background()
+			gctx := cloud.NewContext(gceproject, gc)
+			psClient, err := pubsub.NewClient(ctx, gceproject, gctx)
 			if err != nil {
-				log.Errorf("error pulling messages: %v", err)
+				log.Errorf("error creating pubsub.Client: %v", err)
+				os.Exit(1)
 			}
 
-			for _, m := range msgs {
-				//TODO: ACK messages
-				log.Infof("   msg: %#v", m)
+			sub := psClient.Subscription(subscription)
 
+			it, err := sub.Pull(gctx, pubsub.MaxExtension(time.Minute))
+			if err != nil {
+				log.Errorf("error constructing iterator: %v", err)
+				os.Exit(1)
 			}
+
+			defer it.Stop()
+			go func() {
+				<-quit
+				it.Stop()
+			}()
+
+			for i := 0; i < *numConsume; i++ {
+				m, err := it.Next()
+				if err == pubsub.Done {
+					break
+				}
+				if err != nil {
+					log.Errorf("advancing iterator %v", err)
+					break
+				}
+				log.Infof("message: %#v", m)
+				m.Done(true)
+			}
+
+				msgs, err := pubsub.Pull(gctx, topic, 10)
+				if err != nil {
+					log.Errorf("error pulling messages: %v", err)
+				}
+
+				for _, m := range msgs {
+					//TODO: ACK messages
+					log.Infof("   msg: %#v", m)
+
+				}
 		*/
 	},
 }

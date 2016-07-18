@@ -28,6 +28,7 @@ import (
 var gceproject string
 var gc *http.Client
 var topic string
+var keyPath string
 
 func GCS(projectid string) cloudstorage.GoogleOAuthClient {
 	onGce := metadata.OnGCE()
@@ -74,6 +75,7 @@ func init() {
 	// will be global for your application.
 	RootCmd.PersistentFlags().StringVar(&gceproject, "project", "", "GCE Project")
 	RootCmd.PersistentFlags().StringVar(&topic, "topic", "", "PubSub topic")
+	RootCmd.PersistentFlags().StringVar(&keyPath, "key", "", "PubSub service account key path")
 
 	//cobra.OnInitialize(initClient)
 }
