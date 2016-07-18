@@ -27,6 +27,7 @@ import (
 
 var gceproject string
 var gc *http.Client
+var topic string
 
 func GCS(projectid string) cloudstorage.GoogleOAuthClient {
 	onGce := metadata.OnGCE()
@@ -72,7 +73,7 @@ func init() {
 	// Cobra supports Persistent Flags, which, if defined here,
 	// will be global for your application.
 	RootCmd.PersistentFlags().StringVar(&gceproject, "project", "", "GCE Project")
-	RootCmd.Flags().BoolP("toggle", "t", false, "Help message for toggle")
+	RootCmd.PersistentFlags().StringVar(&topic, "topic", "", "PubSub topic")
 
 	//cobra.OnInitialize(initClient)
 }
