@@ -1,4 +1,4 @@
-// Copyright © 2016 NAME HERE <EMAIL ADDRESS>
+// Copyright © 2016 Josh Roppo joshroppo@gmail.com
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -27,13 +27,8 @@ import (
 // listCmd represents the list command
 var listCmd = &cobra.Command{
 	Use:   "list",
-	Short: "A brief description of your command",
-	Long: `A longer description that spans multiple lines and likely contains examples
-and usage of using your command. For example:
-
-Cobra is a CLI library for Go that empowers applications.
-This application is a tool to generate the needed files
-to quickly create a Cobra application.`,
+	Short: "List all available topics in a project",
+	Long:  `List all available topics in a project`,
 	Run: func(cmd *cobra.Command, args []string) {
 		log.Info("list called")
 		gc := initClient()
@@ -52,30 +47,15 @@ to quickly create a Cobra application.`,
 		call := c.Projects.Topics.List(project)
 		if err := call.Pages(ctx, func(page *pubsub.ListTopicsResponse) error {
 			for _, v := range page.Topics {
-				// TODO: Use v.
-				//_ = v
-				log.Info("Topic found: %s", v)
+				log.Infof("Topic found: %s", v.Name)
 			}
 			return nil // NOTE: returning a non-nil error stops pagination.
 		}); err != nil {
 			log.Errorf("No Topics returned")
-			// TODO: Handle error.
 		}
-
 	},
 }
 
 func init() {
 	RootCmd.AddCommand(listCmd)
-
-	// Here you will define your flags and configuration settings.
-
-	// Cobra supports Persistent Flags which will work for this command
-	// and all subcommands, e.g.:
-	// listCmd.PersistentFlags().String("foo", "", "A help for foo")
-
-	// Cobra supports local flags which will only run when this command
-	// is called directly, e.g.:
-	// listCmd.Flags().BoolP("toggle", "t", false, "Help message for toggle")
-
 }

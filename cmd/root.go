@@ -1,4 +1,4 @@
-// Copyright © 2016 NAME HERE <EMAIL ADDRESS>
+// Copyright © 2016 Josh Roppo joshroppo@gmail.com
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -25,10 +25,13 @@ import (
 	"google.golang.org/cloud/compute/metadata"
 )
 
-var gceproject string
-var gc *http.Client
-var topic string
-var keyPath string
+var (
+	gc         *http.Client
+	gceproject string
+	topic      string
+	keyPath    string
+	loglvl     string
+)
 
 func GCS(projectid string) cloudstorage.GoogleOAuthClient {
 	onGce := metadata.OnGCE()
@@ -68,16 +71,13 @@ func initClient() *http.Client {
 }
 
 func init() {
-	log.SetLevel(log.DebugLevel)
-
-	// Here you will define your flags and configuration settings.
-	// Cobra supports Persistent Flags, which, if defined here,
-	// will be global for your application.
 	RootCmd.PersistentFlags().StringVar(&gceproject, "project", "", "GCE Project")
 	RootCmd.PersistentFlags().StringVar(&topic, "topic", "", "PubSub topic")
 	RootCmd.PersistentFlags().StringVar(&keyPath, "key", "", "PubSub service account key path")
+	RootCmd.PersistentFlags().StringVar(&loglvl, "log", "", "logging level; debug,info,warn,error")
 
-	//cobra.OnInitialize(initClient)
+	lvl, err := log.ParseLevel(loglvl)
+	log.SetLevel(lvl)
 }
 
 // This represents the base command when called without any subcommands
@@ -98,21 +98,3 @@ func Execute() {
 		os.Exit(-1)
 	}
 }
-
-/*
-// initConfig reads in config file and ENV variables if set.
-func initConfig() {
-	if cfgFile != "" { // enable ability to specify config file via flag
-		viper.SetConfigFile(cfgFile)
-	}
-
-	viper.SetConfigName(".pubbing") // name of config file (without extension)
-	viper.AddConfigPath("$HOME")    // adding home directory as first search path
-	viper.AutomaticEnv()            // read in environment variables that match
-
-	// If a config file is found, read it in.
-	if err := viper.ReadInConfig(); err == nil {
-		fmt.Println("Using config file:", viper.ConfigFileUsed())
-	}
-}
-*/

@@ -1,4 +1,4 @@
-// Copyright © 2016 NAME HERE <EMAIL ADDRESS>
+// Copyright © 2016 Josh Roppo joshroppo@gmail.com
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -36,6 +36,8 @@ var (
 	quit         chan os.Signal
 )
 
+// shouldQuit listens on the quit channel and returns true
+// if the signal has been caught and closes the channel.
 func shouldQuit(quit chan os.Signal) bool {
 	select {
 	case q := <-quit:
@@ -49,6 +51,8 @@ func shouldQuit(quit chan os.Signal) bool {
 	}
 }
 
+// JWTClientInit reads in a service account JSON token and creates an oauth
+// token for communicating with GCE.
 func JWTClientInit(ctx *context.Context) *pubsub.Client {
 	jsonKey, err := ioutil.ReadFile(keyPath)
 	if err != nil {
@@ -70,6 +74,8 @@ func JWTClientInit(ctx *context.Context) *pubsub.Client {
 	return psClient
 }
 
+// GCEClientInit uses Google's host FS searching functionality to find auth
+// tokens if they exist. eg: GCE VMs, Authenticated Developers
 func GCEClientInit(ctx *context.Context, project string) *pubsub.Client {
 	var client *pubsub.Client
 	clientOnce := new(sync.Once)
@@ -142,15 +148,4 @@ func init() {
 	RootCmd.AddCommand(subCmd)
 	RootCmd.PersistentFlags().StringVar(&subscription, "sub", "", "PubSub subscription")
 	RootCmd.PersistentFlags().IntVar(&numConsume, "num", 10, "Messages to consume")
-
-	// Here you will define your flags and configuration settings.
-
-	// Cobra supports Persistent Flags which will work for this command
-	// and all subcommands, e.g.:
-	// subCmd.PersistentFlags().String("foo", "", "A help for foo")
-
-	// Cobra supports local flags which will only run when this command
-	// is called directly, e.g.:
-	// subCmd.Flags().BoolP("toggle", "t", false, "Help message for toggle")
-
 }
