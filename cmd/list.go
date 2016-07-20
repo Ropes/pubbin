@@ -41,7 +41,7 @@ var listCmd = &cobra.Command{
 		}
 
 		// The name of the cloud project that topics belong to.
-		project := fmt.Sprintf("projects/%s", gceproject)
+		project := fmt.Sprintf("projects/%s", Gceproject)
 		ctx := context.Background()
 
 		call := c.Projects.Topics.List(project)

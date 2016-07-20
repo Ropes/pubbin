@@ -15,7 +15,11 @@
 package cmd
 
 import (
+	"fmt"
 	"os"
+	"time"
+
+	"golang.org/x/net/context"
 
 	log "github.com/Sirupsen/logrus"
 	"github.com/spf13/cobra"
@@ -34,37 +38,40 @@ Cobra is a CLI library for Go that empowers applications.
 This application is a tool to generate the needed files
 to quickly create a Cobra application.`,
 	Run: func(cmd *cobra.Command, args []string) {
-		log.Infof("pub called on topic: %s", topic)
+		log.Infof("pub called on topic: %s", Topic)
 
-		if gceproject == "" || topic == "" {
+		if Gceproject == "" || Topic == "" {
 			log.Errorf("GCE project and topic must be defined")
 			os.Exit(1)
 		}
-		gc := initClient()
-		gctx := cloud.NewContext(gceproject, gc)
-		log.Infof("gctx: %#v", gctx)
+		ctx := context.Background()
+		pubsubClient := initClient()
+		gctx := cloud.NewContext(Gceproject, pubsubClient)
 
-		msg := &pubsub.Message{Data: []byte("hello world")}
-		msgIDs, err := pubsub.Publish(gctx, "breckenridge", msg)
-		if err != nil {
-			log.Errorf("error publishing %v", err)
+		var psClient *pubsub.Client
+		if KeyPath != "" {
+			psClient = JWTClientInit(&ctx)
+		} else {
+			psClient = GCEClientInit(&ctx, Gceproject)
 		}
-		log.Infof("message IDs: %#v", msgIDs)
+		if psClient == nil {
+			log.Errorf("PubSub client is nil")
+			os.Exit(1)
+		}
 
+		topic := psClient.Topic(Topic)
+		bytes := []byte(fmt.Sprintf("helloworld %v", time.Now()))
+		ids, err := topic.Publish(gctx, &pubsub.Message{Data: bytes})
+		if err != nil {
+			log.Errorf("error publishing messages: %v", err)
+			os.Exit(1)
+		}
+		for _, id := range ids {
+			log.Infof("%#v", id)
+		}
 	},
 }
 
 func init() {
 	RootCmd.AddCommand(pubCmd)
-
-	// Here you will define your flags and configuration settings.
-
-	// Cobra supports Persistent Flags which will work for this command
-	// and all subcommands, e.g.:
-	// pubCmd.PersistentFlags().String("foo", "", "A help for foo")
-
-	// Cobra supports local flags which will only run when this command
-	// is called directly, e.g.:
-	// pubCmd.Flags().BoolP("toggle", "t", false, "Help message for toggle")
-
 }

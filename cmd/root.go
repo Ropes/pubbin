@@ -26,11 +26,12 @@ import (
 )
 
 var (
-	gc         *http.Client
-	gceproject string
-	topic      string
-	keyPath    string
-	loglvl     string
+	GC         *http.Client
+	Gceproject string
+	Topic      string
+	KeyPath    string
+	Loglvl     string
+	Logfmt     string
 )
 
 func GCS(projectid string) cloudstorage.GoogleOAuthClient {
@@ -55,29 +56,40 @@ func GCS(projectid string) cloudstorage.GoogleOAuthClient {
 	return googleClient
 }
 
+func logsetup() {
+	lvl, err := log.ParseLevel(Loglvl)
+	if err != nil {
+		log.Errorf("error parsing loglevel: %v", err)
+	}
+	log.SetLevel(lvl)
+
+	log.Debugf("Logfmt: %s", Logfmt)
+	if Logfmt == "json" {
+		log.SetFormatter(&log.JSONFormatter{})
+	}
+}
+
 func initClient() *http.Client {
 	metaproject, _ := metadata.ProjectID()
-	if gceproject == "" && metaproject == "" {
+	if Gceproject == "" && metaproject == "" {
 		log.Errorf("No project specified")
 		os.Exit(1)
-	} else if gceproject == "" && metaproject != "" {
-		gceproject = metaproject
+	} else if Gceproject == "" && metaproject != "" {
+		Gceproject = metaproject
 	}
 
-	gcs := GCS(gceproject)
+	gcs := GCS(Gceproject)
 	gc := gcs.Client()
 	log.Debugf("Google Auth: %#v", gc)
 	return gc
 }
 
-func init() {
-	RootCmd.PersistentFlags().StringVar(&gceproject, "project", "", "GCE Project")
-	RootCmd.PersistentFlags().StringVar(&topic, "topic", "", "PubSub topic")
-	RootCmd.PersistentFlags().StringVar(&keyPath, "key", "", "PubSub service account key path")
-	RootCmd.PersistentFlags().StringVar(&loglvl, "log", "", "logging level; debug,info,warn,error")
-
-	lvl, err := log.ParseLevel(loglvl)
-	log.SetLevel(lvl)
+func rootinit(Cmd *cobra.Command) {
+	RootCmd.PersistentFlags().StringVar(&Gceproject, "project", "", "GCE Project")
+	RootCmd.PersistentFlags().StringVar(&Topic, "topic", "", "PubSub topic")
+	RootCmd.PersistentFlags().StringVar(&KeyPath, "key", "", "PubSub service account key path")
+	RootCmd.PersistentFlags().StringVar(&Loglvl, "log", "info", "logging level; debug,info,warn,error")
+	RootCmd.PersistentFlags().StringVar(&Logfmt, "logfmt", "text", "logging format: text,json")
 }
 
 // This represents the base command when called without any subcommands
@@ -88,6 +100,20 @@ var RootCmd = &cobra.Command{
 	// Uncomment the following line if your bare application
 	// has an action associated with it:
 	Run: func(cmd *cobra.Command, args []string) { log.Infof("pubbing called without command") },
+}
+
+func init() {
+	rootinit(RootCmd)
+	// Here you will define your flags and configuration settings.
+
+	// Cobra supports Persistent Flags which will work for this command
+	// and all subcommands, e.g.:
+	// pubCmd.PersistentFlags().String("foo", "", "A help for foo")
+
+	// Cobra supports local flags which will only run when this command
+	// is called directly, e.g.:
+	// pubCmd.Flags().BoolP("toggle", "t", false, "Help message for toggle")
+
 }
 
 // Execute adds all child commands to the root command sets flags appropriately.

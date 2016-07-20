@@ -34,6 +34,7 @@ var (
 	subscription string
 	numConsume   int
 	quit         chan os.Signal
+	ack          bool
 )
 
 // shouldQuit listens on the quit channel and returns true
@@ -44,6 +45,7 @@ func shouldQuit(quit chan os.Signal) bool {
 		log.Warnf("quit signal sent: %v", q)
 		signal.Stop(quit)
 		close(quit)
+		quit = nil
 		return true
 	default:
 		log.Debugf("shouldQuit defaulting")
@@ -54,7 +56,7 @@ func shouldQuit(quit chan os.Signal) bool {
 // JWTClientInit reads in a service account JSON token and creates an oauth
 // token for communicating with GCE.
 func JWTClientInit(ctx *context.Context) *pubsub.Client {
-	jsonKey, err := ioutil.ReadFile(keyPath)
+	jsonKey, err := ioutil.ReadFile(KeyPath)
 	if err != nil {
 		log.Errorf("error reading keyfile: %v", err)
 		os.Exit(1)
@@ -66,7 +68,7 @@ func JWTClientInit(ctx *context.Context) *pubsub.Client {
 	}
 
 	oauthTokenSource := conf.TokenSource(*ctx)
-	psClient, err := pubsub.NewClient(*ctx, gceproject, cloud.WithTokenSource(oauthTokenSource))
+	psClient, err := pubsub.NewClient(*ctx, Gceproject, cloud.WithTokenSource(oauthTokenSource))
 	if err != nil {
 		log.Errorf("error creating pubsub client: %v", err)
 		os.Exit(1)
@@ -100,23 +102,26 @@ var subCmd = &cobra.Command{
 	Short: "subscribe to messages",
 	Long:  `Subscribe to messages from a specified topic and subscription.`,
 	Run: func(cmd *cobra.Command, args []string) {
-		log.Infof("sub called on topic: %s", topic)
+		log.Debugf("sub called on topic: %s", Topic)
+		logsetup()
 
 		quit := make(chan os.Signal, 1)
 		signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
 
-		if gceproject == "" || topic == "" || subscription == "" {
+		if Gceproject == "" || Topic == "" || subscription == "" {
 			log.Errorf("GCE project, subscription, and topic must be defined")
 			os.Exit(1)
 		}
 
 		ctx := context.Background()
-		var psClient *pubsub.Client
+		pubsubClient := initClient()
+		gctx := cloud.NewContext(Gceproject, pubsubClient)
 
-		if keyPath != "" {
+		var psClient *pubsub.Client
+		if KeyPath != "" {
 			psClient = JWTClientInit(&ctx)
 		} else {
-			psClient = GCEClientInit(&ctx, gceproject)
+			psClient = GCEClientInit(&ctx, Gceproject)
 		}
 		if psClient == nil {
 			log.Errorf("PubSub client is nil")
@@ -132,12 +137,39 @@ var subCmd = &cobra.Command{
 		}
 		defer it.Stop()
 
-		for !shouldQuit(quit) {
-			m, err := it.Next()
-			if err != nil {
-				log.Errorf("error reading from iterator: %v", err)
+		msgs := make(chan *pubsub.Message)
+		go func() {
+			for !shouldQuit(quit) {
+				m, err := it.Next()
+				if err != nil {
+					log.Errorf("error reading from iterator: %v", err)
+				}
+				if quit == nil { //exit ASAP after Next() returns
+					break
+				}
+				msgs <- m
 			}
-			log.Infof("msg[%s] read: %v", m.ID, m.Data)
+		}()
+
+		i := 0
+		for {
+			select {
+			case m := <-msgs:
+				log.WithFields(log.Fields{"data": m.Data, "str": string(m.Data), "ID": m.ID}).Infof("msg[%s]", m.ID)
+				i++
+
+				if ack {
+					err := pubsub.Ack(gctx, subscription, m.AckID)
+					if err != nil {
+						log.Errorf("error ACKing msg[%s]: %v", m.ID, err)
+					}
+				}
+			case <-time.After(5 * time.Second):
+				log.Debugf("subscription heartbeat")
+			}
+			if quit == nil || i > numConsume {
+				break
+			}
 		}
 
 		os.Exit(0)
@@ -148,4 +180,5 @@ func init() {
 	RootCmd.AddCommand(subCmd)
 	RootCmd.PersistentFlags().StringVar(&subscription, "sub", "", "PubSub subscription")
 	RootCmd.PersistentFlags().IntVar(&numConsume, "num", 10, "Messages to consume")
+	RootCmd.PersistentFlags().BoolVar(&ack, "ack", false, "ACK messages")
 }
