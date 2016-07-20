@@ -113,10 +113,8 @@ var subCmd = &cobra.Command{
 			os.Exit(1)
 		}
 
+		// Configure connection to pubsub
 		ctx := context.Background()
-		pubsubClient := initClient()
-		gctx := cloud.NewContext(Gceproject, pubsubClient)
-
 		var psClient *pubsub.Client
 		if KeyPath != "" {
 			psClient = JWTClientInit(&ctx)
@@ -127,11 +125,11 @@ var subCmd = &cobra.Command{
 			log.Errorf("PubSub client is nil")
 			os.Exit(1)
 		}
-
 		log.Debugf("client: %#v", psClient)
-		sub := psClient.Subscription(subscription)
 
-		it, err := sub.Pull(ctx, pubsub.MaxExtension(time.Second*5))
+		// Create message iterator from client
+		sub := psClient.Subscription(subscription)
+		it, err := sub.Pull(ctx, pubsub.MaxExtension(time.Minute*1))
 		if err != nil {
 			log.Errorf("error creating pubsub iterator: %v", err)
 		}
@@ -159,15 +157,12 @@ var subCmd = &cobra.Command{
 				i++
 
 				if ack {
-					err := pubsub.Ack(gctx, subscription, m.AckID)
-					if err != nil {
-						log.Errorf("error ACKing msg[%s]: %v", m.ID, err)
-					}
+					m.Done(true)
 				}
-			case <-time.After(5 * time.Second):
+			case <-time.After(1 * time.Second):
 				log.Debugf("subscription heartbeat")
 			}
-			if quit == nil || i > numConsume {
+			if shouldQuit(quit) || i > numConsume {
 				break
 			}
 		}
