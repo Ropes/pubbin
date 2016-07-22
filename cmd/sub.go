@@ -44,11 +44,10 @@ func shouldQuit(quit chan os.Signal) bool {
 	case q := <-quit:
 		log.Warnf("quit signal sent: %v", q)
 		signal.Stop(quit)
-		close(quit)
 		quit = nil
 		return true
 	default:
-		log.Debugf("shouldQuit defaulting")
+		//log.Debugf("shouldQuit defaulting")
 		return false
 	}
 }
@@ -140,7 +139,12 @@ var subCmd = &cobra.Command{
 			for !shouldQuit(quit) {
 				m, err := it.Next()
 				if err != nil {
-					log.Errorf("error reading from iterator: %v", err)
+					switch err {
+					case pubsub.Done:
+						log.Infof("pubsub interator finished")
+					default:
+						log.Errorf("error reading from iterator: %v", err)
+					}
 				}
 				if quit == nil { //exit ASAP after Next() returns
 					break
@@ -149,20 +153,29 @@ var subCmd = &cobra.Command{
 			}
 		}()
 
-		i := 0
+		start := time.Now()
+		i0 := 0
+		i1 := 0
 		for {
 			select {
 			case m := <-msgs:
-				log.WithFields(log.Fields{"data": m.Data, "str": string(m.Data), "ID": m.ID}).Infof("msg[%s]", m.ID)
-				i++
-
+				//log.WithFields(log.Fields{"data": m.Data, "str": string(m.Data), "ID": m.ID}).Debugf("msg[%s]", m.ID)
+				i0++
 				if ack {
 					m.Done(true)
 				}
 			case <-time.After(1 * time.Second):
 				log.Debugf("subscription heartbeat")
+				stop := time.Now()
+				log.Infof("Processed %d in %v", (i0 - i1), stop.Sub(start))
+				i1 = i0
 			}
-			if shouldQuit(quit) || i > numConsume {
+			if shouldQuit(quit) || i0 >= numConsume {
+				stop := time.Now()
+				log.Infof("Final Processed %d in %v", (i0 - i1), stop.Sub(start))
+				delta := i0 - i1
+				secs := stop.Sub(start).Seconds()
+				log.Infof("%f msgs/s", float64(delta)/secs)
 				break
 			}
 		}
@@ -173,7 +186,7 @@ var subCmd = &cobra.Command{
 
 func init() {
 	RootCmd.AddCommand(subCmd)
-	RootCmd.PersistentFlags().StringVar(&subscription, "sub", "", "PubSub subscription")
-	RootCmd.PersistentFlags().IntVar(&numConsume, "num", 10, "Messages to consume")
-	RootCmd.PersistentFlags().BoolVar(&ack, "ack", false, "ACK messages")
+	subCmd.PersistentFlags().StringVar(&subscription, "sub", "", "PubSub subscription")
+	subCmd.PersistentFlags().IntVar(&numConsume, "num", 10, "Messages to consume")
+	subCmd.PersistentFlags().BoolVar(&ack, "ack", false, "ACK messages")
 }
