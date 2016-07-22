@@ -1,0 +1,406 @@
+package cloudstorage
+
+import (
+	"bufio"
+	"bytes"
+	"fmt"
+	"io"
+	"os"
+	"strings"
+	"time"
+
+	"golang.org/x/net/context"
+
+	"google.golang.org/cloud/storage"
+
+	"github.com/lytics/cloudstorage/logging"
+	"github.com/pborman/uuid"
+)
+
+const GCSMemSource = "GCSMem"
+
+// Memstore maps file path keys to in memory byte byffers
+type GCSMemStore struct {
+	gcs      *storage.Client
+	bucket   string
+	PageSize int //TODO pipe this in from eventstore
+	Id       string
+
+	Log logging.Logger
+
+	objectMap map[string]*memGCSObject
+	metadatas map[string]map[string]string
+}
+
+func NewGCSMemStore(gcs *storage.Client, bucket, cachepath string, pagesize int, l logging.Logger) (*GCSMemStore, error) {
+
+	uid := uuid.NewUUID().String()
+	uid = strings.Replace(uid, "-", "", -1)
+
+	objectMap := make(map[string]*memGCSObject)
+
+	return &GCSMemStore{
+		gcs:       gcs,
+		bucket:    bucket,
+		Id:        uid,
+		objectMap: objectMap,
+		PageSize:  pagesize,
+		Log:       l,
+	}, nil
+}
+
+func (g *GCSMemStore) String() string {
+	return fmt.Sprintf("gs://%s/", g.bucket)
+}
+
+func (g *GCSMemStore) gcsb() *storage.BucketHandle {
+	return g.gcs.Bucket(g.bucket)
+}
+
+// Return new memGCSObject
+func (g *GCSMemStore) NewObject(objectname string) (*memGCSObject, error) {
+	obj, err := g.Get(objectname)
+	if err != nil && err != ObjectNotFound {
+		return nil, err
+	} else if obj != nil {
+		return nil, ObjectExists
+	}
+
+	obj = &memGCSObject{
+		name:     objectname,
+		metadata: map[string]string{ContextTypeKey: contentType(objectname)},
+		buff:     bytes.NewBuffer([]byte{}),
+		gcsb:     g.gcsb(),
+		bucket:   g.bucket,
+		log:      g.Log,
+	}
+
+	// Create objectMap entry
+	g.objectMap[objectname] = obj
+
+	return obj, nil
+}
+
+//ListObjects is a wrapper around storeage.ListObjects, that retries on a GCS error.  GCS isn't a prefect system :p, and returns an error
+//  about once every 2 weeks.
+func (g *GCSMemStore) listObjects(q *Query, retries int) (*storage.ObjectList, error) {
+	var lasterr error = nil
+	//GCS sometimes returns a 500 error, so we'll just retry...
+	for i := 0; i < retries; i++ {
+		objects, err := g.gcsb().List(context.Background(), q)
+		if err != nil {
+			g.Log.Errorf("error listing objects for the bucket. try:%d store:%s q.prefix:%v err:%v", i, g, q.Prefix, err)
+			lasterr = err
+			backoff(i)
+			continue
+		}
+		return objects, nil
+	}
+	return nil, lasterr
+}
+
+func (g *GCSMemStore) List(query Query) ([]memGCSObject, error) {
+	var q = &Query{Prefix: query.Prefix, MaxResults: g.PageSize}
+
+	gobjects, err := g.listObjects(q, GCSRetries)
+	if err != nil {
+		g.Log.Errorf("couldn't list objects. prefix=%s err=%v", q.Prefix, err)
+		return nil, err
+	}
+
+	if gobjects == nil {
+		return make(memGCSObject, 0), nil
+	}
+
+	if gobjects.Next != nil {
+		q = gobjects.Next
+		for q != nil {
+			gobjectsB, err := g.listObjects(q, GCSRetries)
+			if err != nil {
+				g.Log.Errorf("couldn't list the remaining pages of objects. prefix=%s err=%v", q.Prefix, err)
+				return nil, err
+			}
+
+			concatGCSObjects(gobjects, gobjectsB)
+
+			if gobjectsB != nil {
+				q = gobjectsB.Next
+			} else {
+				q = nil
+			}
+		}
+	}
+
+	res := make([]memGCSObject, 0)
+
+	for _, gobj := range gobjects.Results {
+		if len(gobj.Metadata) == 0 {
+			gobj.Metadata = make(map[string]string)
+		}
+		if _, ok := gobj.Metadata["Content-Length"]; !ok {
+			gobj.Metadata["Content-Length"] = fmt.Sprintf("%v", gobj.Size)
+		}
+		gobj.Metadata["md5"] = string(gobj.MD5)
+		o := &gcsFSObject{
+			name:     gobj.Name,
+			updated:  gobj.Updated,
+			metadata: gobj.Metadata,
+			gcsb:     g.gcsb(),
+			bucket:   g.bucket,
+			log:      g.Log,
+		}
+		res = append(res, o)
+	}
+
+	res = query.applyFilters(res)
+
+	return res, nil
+}
+
+// Get a memGCSObject
+func (g *GCSMemStore) Get(o string) (*memGCSObject, error) {
+	var q = &Query{Prefix: o, MaxResults: 1}
+
+	gobjects, err := g.listObjects(q, GCSRetries)
+	if err != nil {
+		g.Log.Errorf("couldn't list objects. prefix=%s err=%v", q.Prefix, err)
+		return nil, err
+	}
+
+	if gobjects == nil || len(gobjects.Results) == 0 {
+		return nil, ObjectNotFound
+	}
+
+	gobj := gobjects.Results[0]
+	res := &memGCSObject{
+		name:         gobj.Name,
+		updated:      gobj.Updated,
+		metadata:     gobj.Metadata,
+		gcsb:         g.gcsb(),
+		googleObject: gobj,
+		bucket:       g.bucket,
+		log:          g.Log,
+	}
+	return res, nil
+}
+
+func (g *GCSMemStore) Delete(o string) error {
+	err := g.gcsb().Object(o).Delete(context.Background())
+	if err != nil {
+		g.Log.Errorf("error deleting object. object=%s%s err=%v", g, o, err)
+		return err
+	}
+	return nil
+}
+
+type memGCSObject struct {
+	name         string
+	updated      time.Time
+	metadata     map[string]string
+	googleObject *storage.ObjectAttrs
+
+	gcsb   *storage.BucketHandle
+	bucket string
+
+	log  logging.Logger
+	buff *bytes.Buffer
+
+	memcopy  ReadWriteSeekTruncateCloser
+	readonly bool
+	opened   bool
+	fd       *os.File
+}
+
+func (o *memGCSObject) StorageSource() string {
+	return GCSFSStorageSource
+}
+func (o *memGCSObject) Name() string {
+	return o.name
+}
+func (o *memGCSObject) String() string {
+	return o.name
+}
+func (o *memGCSObject) Updated() time.Time {
+	return o.updated
+}
+func (o *memGCSObject) MetaData() map[string]string {
+	return o.metadata
+}
+func (o *memGCSObject) SetMetaData(meta map[string]string) {
+	o.metadata = meta
+}
+
+func (o *memGCSObject) Stat() (os.FileInfo, error) {
+	return BuffInfo{name: o.name, buff: o.buff, mode: os.ModeTemporary, updated: o.updated}, nil
+}
+
+type BuffInfo struct {
+	name    string
+	buff    *bytes.Buffer
+	mode    os.FileMode
+	updated time.Time
+}
+
+func (b BuffInfo) Name() string       { return b.name }
+func (b BuffInfo) Size() int64        { return int64(b.buff.Len()) }
+func (b BuffInfo) Mode() os.FileMode  { return b.mode }
+func (b BuffInfo) ModTime() time.Time { return b.updated }
+func (b BuffInfo) IsDir() bool        { return false }
+func (b BuffInfo) Sys() interface{}   { return []byte{} }
+
+// Open filesystem File write to buffer and return RWSTC
+func (o *memGCSObject) Open(accesslevel AccessLevel) (ReadWriteSeekTruncateCloser, error) {
+	if o.opened {
+		return nil, fmt.Errorf("the store object is already opened.")
+	}
+	var errs []error = make([]error, 0)
+	var readonly = accesslevel == ReadOnly
+
+	for try := 0; try < GCSRetries; try++ {
+		if o.googleObject == nil {
+			var q = &Query{Prefix: o.name, MaxResults: 1}
+			objects, err := o.gcsb.List(context.Background(), q)
+			if err != nil {
+				errs = append(errs, fmt.Errorf("error storage.NewReader err=%v", err))
+				o.log.Debugf("%v", errs)
+				backoff(try)
+				continue
+			}
+
+			if objects.Results != nil && len(objects.Results) != 0 {
+				o.googleObject = objects.Results[0]
+			}
+		}
+
+		if o.googleObject != nil {
+			//we have a preexisting object, so lets download it..
+			rc, err := o.gcsb.Object(o.name).NewReader(context.Background())
+			if err != nil {
+				errs = append(errs, fmt.Errorf("error storage.NewReader err=%v", err))
+				o.log.Debugf("%v", errs)
+				backoff(try)
+				continue
+			}
+			defer rc.Close()
+
+			_, err = io.Copy(o.buff, rc)
+			if err != nil {
+				errs = append(errs, fmt.Errorf("error coping bytes. err=%v", err))
+				o.log.Debugf("%v", errs)
+				backoff(try)
+				continue
+			}
+		}
+
+		/* Not sure how best to handle this...
+		if readonly {
+			cachedcopy.Close()
+			cachedcopy, err = os.Open(o.cachepath)
+			if err != nil {
+				return nil, fmt.Errorf("error occurred opening file. local=%s object=%s tfile=%v err=%v",
+					o.cachepath, o.name, cachedcopy.Name(), err)
+			}
+		}
+		*/
+
+		o.readonly = readonly
+		o.opened = true
+		//Returning nil to fufil interface, however interaction with buffer takes place through memGCSObject
+		return o, nil
+	}
+	return nil, fmt.Errorf("memGCSObject.Open() Error, exceeded retry limit")
+}
+
+// No?
+func (o *memGCSObject) File() *os.File {
+	return nil
+}
+
+// Read from buffer
+func (o *memGCSObject) Read(p []byte) (n int, err error) {
+	return o.buff.Read(p)
+}
+
+func (o *memGCSObject) Seek(offset int64, whence int) (int64, error) {
+	return 0, fmt.Errorf("Seeking from a Memory Buffer is not allowed")
+}
+
+func (o *memGCSObject) Truncate(t int64) error {
+	o.buff.Truncate(int(t))
+	return nil
+}
+
+// Write byte slice to buffer
+func (o *memGCSObject) Write(p []byte) (n int, err error) {
+	o.updated = time.Now()
+	return o.buff.Write(p)
+}
+
+func (o *memGCSObject) Close() error {
+	if !o.opened {
+		return nil
+	}
+
+	err := o.Sync()
+	if err != nil {
+		return err
+	}
+
+	if o.opened && !o.readonly {
+		err := o.Sync()
+		if err != nil {
+			return err
+		}
+	}
+
+	o.opened = false
+	return nil
+}
+
+// Write the buffer to the disk
+func (o *memGCSObject) Sync() error {
+	if !o.opened {
+		return fmt.Errorf("object isn't opened object:%s", o.name)
+	}
+	if o.readonly {
+		return fmt.Errorf("trying to Sync a readonly object:%s", o.name)
+	}
+
+	var errs = make([]string, 0)
+	for try := 0; try < GCSRetries; try++ {
+		rd := bufio.NewReader(o.buff)
+
+		wc := o.gcsb.Object(o.name).NewWriter(context.Background())
+
+		if o.metadata != nil {
+			wc.Metadata = o.metadata
+			//contenttype is only used for viewing the file in a browser. (i.e. the GCS Object browser).
+			ctype := ensureContextType(o.name, o.metadata)
+			wc.ContentType = ctype
+		}
+
+		if _, err := io.Copy(wc, rd); err != nil {
+			errs = append(errs, fmt.Sprintf("couldn't copy localcache file to remote object. object:%s err=%v", o.name, err))
+			backoff(try)
+			continue
+		}
+
+		if err := wc.Close(); err != nil {
+			errs = append(errs, fmt.Sprintf("couldn't close gcs writer. object:%s err=%v", o.name, err))
+			backoff(try)
+			continue
+		}
+
+		return nil
+	}
+
+	errmsg := strings.Join(errs, ",")
+
+	return fmt.Errorf("unable to sync file: errors[%v]", errmsg)
+}
+
+func (o *memGCSObject) Release() error {
+	//No local files to delete
+	o.buff.Reset()
+	return nil
+}
